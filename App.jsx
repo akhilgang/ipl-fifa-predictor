@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 
-const API_URL = process.env.REACT_APP_API_URL || "https://your-api-id.execute-api.ap-south-1.amazonaws.com";
+const API_URL = process.env.REACT_APP_API_URL || "https://asfuo5zeki.execute-api.ap-south-1.amazonaws.com";
 
 /* ── IPL teams for testing ── */
 const IPL_TEAMS = [

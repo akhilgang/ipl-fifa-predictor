@@ -2,7 +2,7 @@ variable "project_name"                 { type=string }
 variable "versioning"                   { type=bool }
 
 resource "aws_s3_bucket" "this" {
-  bucket = "${var.project_name}-model-data"
+  bucket = "${var.project_name}-model-data-v1"
 
   tags = {
     Name = "${var.project_name}-model"
