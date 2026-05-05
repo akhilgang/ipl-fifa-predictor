@@ -1,0 +1,61 @@
+# ----------------------------
+# Terraform core files
+# ----------------------------
+.terraform/
+.terraform.lock.hcl
+
+# Terraform state files (VERY IMPORTANT)
+*.tfstate
+*.tfstate.*
+
+# Crash logs
+crash.log
+
+# Sensitive variable files
+*.tfvars
+*.tfvars.json
+
+# Override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI config files
+.terraformrc
+terraform.rc
+
+# ----------------------------
+# OS / Editor junk
+# ----------------------------
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# ----------------------------
+# Python (your ML project)
+# ----------------------------
+__pycache__/
+*.pyc
+venv/
+.env
+
+# ----------------------------
+# Node (if frontend present)
+# ----------------------------
+node_modules/
+dist/
+build/
+
+# ----------------------------
+# Zip / artifacts
+# ----------------------------
+*.zip
+
+# ----------------------------
+# AWS / credentials safety
+# ----------------------------
+*.pem
+.env
