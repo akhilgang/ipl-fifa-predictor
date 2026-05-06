@@ -1,0 +1,18 @@
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - cd ui
+        - node --version
+        - npm ci
+    build:
+      commands:
+        - npm run build
+  artifacts:
+    baseDirectory: ui/build
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - ui/node_modules/**/*

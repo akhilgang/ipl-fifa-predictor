@@ -9,8 +9,6 @@ terraform {
 
 provider "aws" { region = var.aws_region }
 
-resource "random_id" "suffix" { byte_length = 4 }
-
 # ── S3: single bucket, both models ───────────────────────────────────────────
 module "s3" {
   source = "./modules/s3"
@@ -49,11 +47,15 @@ module "api_gateway" {
 }
 
 # # ── Amplify UI ────────────────────────────────────────────────────────────────
-# module "amplify" {
-#   source          = "./modules/amplify"
-#   app_name        = "match-predictor"
-#   api_gateway_url = module.api_gateway.api_url
-# }
+module "amplify" {
+  source          = "./modules/amplify"
+  project_name    = var.project_name
+  # app_name = "${var.project_name}-ui"
+  api_gateway_url = module.api_gateway.api_url
+  github_repo     = var.github_repo
+  github_token    = var.github_token
+  branch          = var.github_branch
+}
 
 # ── EventBridge: IPL result poller (every 2h during May) ─────────────────────
 resource "aws_cloudwatch_event_rule" "ipl_poller" {
