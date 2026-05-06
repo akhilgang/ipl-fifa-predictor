@@ -32,6 +32,7 @@ module "lambda" {
   fifa_predictions_table   = module.dynamodb.fifa_predictions_table_name
   fifa_stats_table         = module.dynamodb.fifa_stats_table_name
   log_retention_days       = var.log_retention_days
+  layer_zip_path = var.layer_zip_path
 }
 
 # ── API Gateway ───────────────────────────────────────────────────────────────

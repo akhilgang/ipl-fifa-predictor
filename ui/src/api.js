@@ -7,7 +7,11 @@ async function call(path, method = 'GET', body = null) {
     body: body ? JSON.stringify(body) : null,
   });
   if (!res.ok) throw new Error(`API error ${res.status}`);
-  return res.json();
+  const data = await res.json();
+
+  return typeof data.body === 'string'
+    ? JSON.parse(data.body)
+    : data;
 }
 
 export const api = {

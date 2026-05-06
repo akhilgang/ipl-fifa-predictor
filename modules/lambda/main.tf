@@ -7,7 +7,20 @@ variable "fifa_stats_table"         { type=string }
 variable "log_retention_days"       { type=number }
 # variable "football_data_api_key"    { type=string; sensitive=true; default="" }
 # variable "cricbuzz_api_key"         { type=string; sensitive=true; default="" }
-
+variable "layer_zip_path" {
+  type    = string
+  default = "sklearn-layer/ml-deps/sklearn-layer.zip"
+}
+# ── Lambda Layer: scikit-learn + joblib + numpy ───────────────────────────────
+resource "aws_lambda_layer_version" "sklearn" {
+  # filename            = var.layer_zip_path
+  s3_bucket           = var.model_bucket
+  s3_key              = "sklearn-layer/ml-deps/sklearn-layer.zip"
+  source_code_hash    = filebase64sha256(var.layer_zip_path)
+  layer_name          = "${var.project_name}-sklearn"
+  compatible_runtimes = ["python3.12"]
+  description         = "scikit-learn, joblib, numpy for Lambda"
+}
 # ── Shared IAM role ───────────────────────────────────────────────────────────
 resource "aws_iam_role" "lambda_exec" {
   name = "${var.project_name}-lambda-role"
@@ -57,6 +70,7 @@ locals {
     FIFA_PREDICTIONS_TABLE   = var.fifa_predictions_table
     FIFA_STATS_TABLE         = var.fifa_stats_table
   }
+  layers = [aws_lambda_layer_version.sklearn.arn]
 }
 
 # ── Zip source files ──────────────────────────────────────────────────────────
@@ -71,10 +85,11 @@ resource "aws_lambda_function" "predict" {
   function_name    = "${var.project_name}-predict"
   role             = aws_iam_role.lambda_exec.arn
   handler          = "predict_handler.handler"
-  runtime          = "python3.11"
+  runtime          = "python3.12"
   filename         = data.archive_file.predict.output_path
   source_code_hash = data.archive_file.predict.output_base64sha256
   memory_size      = 512
+  layers = local.layers
   timeout          = 30
   environment { variables = local.common_env }
 }
@@ -88,11 +103,12 @@ resource "aws_lambda_function" "accuracy" {
   function_name    = "${var.project_name}-accuracy"
   role             = aws_iam_role.lambda_exec.arn
   handler          = "accuracy_handler.handler"
-  runtime          = "python3.11"
+  runtime          = "python3.12"
   filename         = data.archive_file.predict.output_path
   source_code_hash = data.archive_file.predict.output_base64sha256
   memory_size      = 128
   timeout          = 10
+  layers = local.layers
   environment { variables = local.common_env }
 }
 resource "aws_cloudwatch_log_group" "accuracy" {
@@ -104,12 +120,13 @@ resource "aws_cloudwatch_log_group" "accuracy" {
 resource "aws_lambda_function" "simulate" {
   function_name    = "${var.project_name}-simulate"
   role             = aws_iam_role.lambda_exec.arn
-  handler          = "predict_handler.handler"   # same handler, simulate=true in body
-  runtime          = "python3.11"
+  handler          = "simulator_handler.handler"   # same handler, simulate=true in body
+  runtime          = "python3.12"
   filename         = data.archive_file.predict.output_path
   source_code_hash = data.archive_file.predict.output_base64sha256
   memory_size      = 512
   timeout          = 60   # Monte Carlo needs more time
+  layers = local.layers
   environment { variables = local.common_env }
 }
 resource "aws_cloudwatch_log_group" "simulate" {
@@ -122,11 +139,12 @@ resource "aws_lambda_function" "ipl_result_updater" {
   function_name    = "${var.project_name}-ipl-result-updater"
   role             = aws_iam_role.lambda_exec.arn
   handler          = "ipl_result_updater.handler"
-  runtime          = "python3.11"
+  runtime          = "python3.12"
   filename         = data.archive_file.predict.output_path
   source_code_hash = data.archive_file.predict.output_base64sha256
   memory_size      = 128
   timeout          = 60
+  layers = local.layers
   environment { variables = local.common_env }
 }
 resource "aws_cloudwatch_log_group" "ipl_result_updater" {
@@ -139,11 +157,12 @@ resource "aws_lambda_function" "fifa_result_updater" {
   function_name    = "${var.project_name}-fifa-result-updater"
   role             = aws_iam_role.lambda_exec.arn
   handler          = "fifa_result_updater.handler"
-  runtime          = "python3.11"
+  runtime          = "python3.12"
   filename         = data.archive_file.predict.output_path
   source_code_hash = data.archive_file.predict.output_base64sha256
   memory_size      = 128
   timeout          = 60
+  layers = local.layers
   environment { variables = local.common_env }
 }
 resource "aws_cloudwatch_log_group" "fifa_result_updater" {

@@ -39,3 +39,7 @@ variable "alert_email" {
   type    = string
   default = "ubitosan22@email.com"
 }
+variable "layer_zip_path" {
+  type    = string
+  default = "../../sklearn-layer.zip"
+}

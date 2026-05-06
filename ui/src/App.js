@@ -227,7 +227,7 @@ function SimulateTab() {
       const r = sport === 'ipl'
         ? await api.simulateIPL({}, [])   // pass current points_table in production
         : await api.simulateFIFA();
-      setResult({ sport, ...r.simulation });
+      setResult({ sport, ...r });
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   }

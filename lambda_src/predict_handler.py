@@ -40,19 +40,28 @@ def _enc(le, val, fallback=0):
     try:    return int(le.transform([val])[0])
     except: return fallback
 
-IPL_STAGE_W  = {"league":3,"playoff":8,"final":10}
 FIFA_STAGE_W = {"group":5,"round_of_32":6,"round_of_16":7,
                 "quarterfinal":8,"semifinal":9,"final":10}
+IPL_STAGE_W = {"league": 1, "playoff": 2, "eliminator": 2, "final": 3}
 
 def ipl_features(t1, t2, venue, stage, t1_wr=0.5, t2_wr=0.5):
     model, le_t1, le_t2, le_venue = get_ipl_artifacts()
+    stage_weight = IPL_STAGE_W.get(str(stage).lower(), 1)
     return [
-        _enc(le_t1, t1), _enc(le_t2, t2),
-        1, 1,                                   # toss won, bat first (defaults)
-        _enc(le_venue, venue) if venue else 0,
-        t1_wr, t2_wr, 0, 0,                    # win rates, streak
-        t1_wr - t2_wr, 0,                       # wr_diff, streak_diff
-        0.5, 2026,                               # h2h, season
+        _enc(le_t1, t1),                          # 1  t1_enc
+        _enc(le_t2, t2),                          # 2  t2_enc
+        1,                                         # 3  toss_won_by_team1
+        1,                                         # 4  toss_bat_first
+        _enc(le_venue, venue) if venue else 0,    # 5  venue_enc
+        stage_weight,                              # 6  stage_weight ← ADDED
+        t1_wr,                                     # 7  t1_win_rate
+        t2_wr,                                     # 8  t2_win_rate
+        0,                                         # 9  t1_streak
+        0,                                         # 10 t2_streak
+        t1_wr - t2_wr,                            # 11 wr_diff
+        0,                                         # 12 streak_diff
+        0.5,                                       # 13 h2h_t1_win_rate
+        2026,                                      # 14 season_num
     ], model
 
 def fifa_features(home, away, stage, h_wr=0.45, a_wr=0.40):
