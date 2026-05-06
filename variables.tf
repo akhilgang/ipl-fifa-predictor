@@ -15,12 +15,12 @@ variable "log_retention_days" {
 
 variable "github_repo" {
   type    = string
-  default = "https://github.com/akhilgang/ipl-fifa-predictor.git"
+  default = ""
 }
 
 variable "github_token" {
   type      = string
-  default   = "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"
+  default   = ""
   sensitive = true
 }
 
