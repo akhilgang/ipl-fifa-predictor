@@ -18,11 +18,11 @@ variable "github_repo" {
   default = ""
 }
 
-# variable "github_token" {
-#   type      = string
-#   default   = ""
-#   sensitive = true
-# }
+variable "github_token" {
+  type      = string
+  default   = ""
+  sensitive = true
+}
 
 variable "github_branch" {
   type    = string
