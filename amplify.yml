@@ -5,7 +5,7 @@ frontend:
       commands:
         - cd ui
         - node --version
-        - npm ci
+        - npm install
     build:
       commands:
         - npm run build
