@@ -53,7 +53,7 @@ module "amplify" {
   # app_name = "${var.project_name}-ui"
   api_gateway_url = module.api_gateway.api_url
   github_repo     = var.github_repo
-  github_token    = var.github_token
+  # github_token    = var.github_token
   branch          = var.github_branch
 }
 

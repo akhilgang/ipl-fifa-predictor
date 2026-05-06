@@ -1,10 +1,10 @@
 variable "project_name"   { type = string }
 variable "api_gateway_url" { type = string }
 variable "github_repo"     { type = string }
-variable "github_token" {
-  type      = string
-  sensitive = true
-}
+# variable "github_token" {
+#   type      = string
+#   sensitive = true
+# }
 variable "branch" {
   type    = string
   default = "main"
@@ -13,7 +13,7 @@ variable "branch" {
 resource "aws_amplify_app" "ui" {
   name         = "${var.project_name}-ui"
   repository   = var.github_repo
-  access_token = var.github_token
+  # access_token = var.github_token
 
   # Amplify reads amplify.yml from repo root — no build_spec needed here
   build_spec = null
