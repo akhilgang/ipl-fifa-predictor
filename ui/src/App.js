@@ -202,7 +202,7 @@ function IPLSimulate() {
 
   async function simulate() {
     setLoading(true); setError(''); setResult(null);
-    try { setResult(await api.simulateIPL()); }
+    try { const r = await api.simulateIPL(); setResult(r.simulation ?? r); }
     catch(e) { setError(e.message); }
     finally { setLoading(false); }
   }
@@ -273,7 +273,7 @@ function FIFASimulate() {
 
   async function simulate() {
     setLoading(true); setError(''); setResult(null);
-    try { setResult(await api.simulateFIFA()); }
+    try { const r = await api.simulateFIFA(); setResult(r.simulation ?? r); }
     catch(e) { setError(e.message); }
     finally { setLoading(false); }
   }
