@@ -8,24 +8,22 @@ async function call(path, method = 'GET', body = null) {
   });
   if (!res.ok) throw new Error(`API error ${res.status}`);
   const data = await res.json();
-
-  return typeof data.body === 'string'
-    ? JSON.parse(data.body)
-    : data;
+  return typeof data.body === 'string' ? JSON.parse(data.body) : data;
 }
 
 export const api = {
-  predictIPL:  (team1, team2, venue, stage) =>
+  predictIPL: (team1, team2, venue, stage) =>
     call('/predict', 'POST', { sport: 'ipl', team1, team2, venue, stage }),
 
   predictFIFA: (home_team, away_team, stage) =>
     call('/predict', 'POST', { sport: 'fifa', home_team, away_team, stage }),
 
-  simulateIPL: (points_table, remaining_fixtures) =>
-    call('/simulate', 'POST', { sport: 'ipl', simulate: true, points_table, remaining_fixtures }),
+  // Simulator loads fixtures from S3 automatically — no need to pass them
+  simulateIPL: () =>
+    call('/simulate', 'POST', { sport: 'ipl' }),
 
   simulateFIFA: () =>
-    call('/simulate', 'POST', { sport: 'fifa', simulate: true }),
+    call('/simulate', 'POST', { sport: 'fifa' }),
 
   accuracy: () =>
     call('/accuracy', 'GET'),

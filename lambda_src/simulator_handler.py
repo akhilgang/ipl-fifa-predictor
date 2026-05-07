@@ -1,355 +1,354 @@
 """
-simulator.py
-Monte Carlo Tournament Simulator
-- IPL: top-4 playoff qualification probabilities
-- FIFA: group qualification + full knockout bracket win probabilities
-Run: python simulator.py --sport ipl
-     python simulator.py --sport fifa
-     python simulator.py --sport both
+simulator.py — Lambda handler + local CLI
+Loads ipl_fixtures.py and fifa_fixtures.py from S3 as Python source,
+or imports them directly when running locally.
 """
 
-import argparse
-import random
-import json
-import joblib
-import numpy as np
+import argparse, random, json, os, io, sys
+import joblib, numpy as np
 from collections import defaultdict
 from copy import deepcopy
 
-from fifa_fixtures import (FIFA_GROUPS, FIFA_GROUP_FIXTURES,
-                            KNOCKOUT_SCHEDULE, resolve_team)
-from ipl_fixtures  import (IPL_TEAMS, IPL_POINTS_TABLE,
-                            IPL_REMAINING_FIXTURES, IPL_PLAYOFF_SCHEDULE)
+IS_LAMBDA = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
 
-N_SIMULATIONS = 10_000   # increase to 50k for tighter confidence intervals
+# ── Fixture loading ───────────────────────────────────────────────────────────
+# Locally  : import directly
+# In Lambda: load .py source from S3, exec into a namespace, pull constants out
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  SHARED: load models
-# ═══════════════════════════════════════════════════════════════════════════════
+def _load_py_from_s3(key):
+    import boto3
+    bucket = os.environ["MODEL_BUCKET"]
+    src = boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+    ns = {}
+    exec(compile(src, key, "exec"), ns)
+    return ns
 
-def load_ipl_model():
-    model    = joblib.load("ipl_model.pkl")
-    le_t1    = joblib.load("ipl_le_t1.pkl")
-    le_t2    = joblib.load("ipl_le_t2.pkl")
+if IS_LAMBDA:
+    _fifa = _load_py_from_s3("fifa_fixtures.py")
+    FIFA_GROUPS        = _fifa["FIFA_GROUPS"]
+    FIFA_GROUP_FIXTURES= _fifa["FIFA_GROUP_FIXTURES"]
+    resolve_team       = _fifa["resolve_team"]
+
+    _ipl = _load_py_from_s3("ipl_fixtures.py")
+    IPL_TEAMS              = _ipl["IPL_TEAMS"]
+    IPL_POINTS_TABLE       = _ipl["IPL_POINTS_TABLE"]
+    IPL_REMAINING_FIXTURES = _ipl["IPL_REMAINING_FIXTURES"]
+else:
+    sys.path.insert(0, os.path.dirname(__file__) or ".")
     try:
-        le_venue = joblib.load("ipl_le_venue.pkl")
-    except FileNotFoundError:
-        le_venue = None
-    return model, le_t1, le_t2, le_venue
+        from fifa_fixtures import FIFA_GROUPS, FIFA_GROUP_FIXTURES, resolve_team
+        from ipl_fixtures  import IPL_TEAMS, IPL_POINTS_TABLE, IPL_REMAINING_FIXTURES
+    except ImportError as e:
+        raise ImportError(f"Run from the directory containing fifa_fixtures.py: {e}")
 
-def load_fifa_model():
-    model    = joblib.load("fifa_model.pkl")
-    le_home  = joblib.load("fifa_le_home.pkl")
-    le_away  = joblib.load("fifa_le_away.pkl")
-    return model, le_home, le_away
+N_SIMULATIONS = 10_000
 
+# ── Model cache ───────────────────────────────────────────────────────────────
+_cache = {}
+
+def _load(key):
+    if key in _cache:
+        return _cache[key]
+    if IS_LAMBDA:
+        import boto3
+        bucket = os.environ["MODEL_BUCKET"]
+        obj    = boto3.client("s3").get_object(Bucket=bucket, Key=key)
+        _cache[key] = joblib.load(io.BytesIO(obj["Body"].read()))
+    else:
+        _cache[key] = joblib.load(key)
+    return _cache[key]
+
+def load_ipl():
+    return _load("ipl_model.pkl"), _load("ipl_le_t1.pkl"), \
+           _load("ipl_le_t2.pkl"), _load("ipl_le_venue.pkl")
+
+def load_fifa():
+    return _load("fifa_model.pkl"), _load("fifa_le_home.pkl"), _load("fifa_le_away.pkl")
+
+# ── Encoders ──────────────────────────────────────────────────────────────────
+def _enc(le, val, fallback=0):
+    try:    return int(le.transform([val])[0])
+    except: return fallback
+
+# ── IPL features: 14 — matches train_ipl.py exactly ──────────────────────────
+# t1_enc, t2_enc, toss_won_by_team1, toss_bat_first, venue_enc, stage_weight,
+# t1_win_rate, t2_win_rate, t1_streak, t2_streak, wr_diff, streak_diff,
+# h2h_t1_win_rate, season_num
+
+IPL_STAGE_W = {"league":1,"qualifier_1":2,"eliminator":2,"qualifier_2":2,"final":3}
+
+def ipl_feats(le_t1, le_t2, le_venue, t1, t2,
+              venue=None, stage="league",
+              t1_wr=0.5, t2_wr=0.5, t1_st=0, t2_st=0, h2h=0.5):
+    return [
+        _enc(le_t1, t1), _enc(le_t2, t2),   # 1-2
+        1, 1,                                 # 3-4 toss defaults
+        _enc(le_venue, venue) if venue else 0,# 5   venue_enc
+        IPL_STAGE_W.get(stage, 1),            # 6   stage_weight
+        t1_wr, t2_wr,                         # 7-8
+        t1_st, t2_st,                         # 9-10
+        t1_wr - t2_wr, t1_st - t2_st,        # 11-12 wr_diff, streak_diff
+        h2h,                                  # 13
+        2026,                                 # 14 season_num
+    ]
+
+def ipl_win_prob(model, le_t1, le_t2, le_venue,
+                 t1, t2, venue=None, stage="league",
+                 t1_wr=0.5, t2_wr=0.5):
+    f  = ipl_feats(le_t1, le_t2, le_venue, t1, t2, venue, stage, t1_wr, t2_wr)
+    pr = model.predict_proba([f])[0]
+    cl = list(model.classes_)
+    return float(pr[cl.index(1)])
+
+# ── FIFA features: 11 — matches train_fifa.py exactly ────────────────────────
+# home_enc, away_enc, tournament_weight, is_neutral,
+# home_win_rate, away_win_rate, home_avg_gd, away_avg_gd,
+# wr_diff, gd_diff, h2h_home_win_rate
+
+FIFA_STAGE_W = {"group":5,"round_of_32":6,"round_of_16":7,
+                "quarterfinal":8,"semifinal":9,"final":10}
+
+def fifa_feats(le_home, le_away, home, away, stage="group",
+               h_wr=0.45, a_wr=0.40):
+    h = _enc(le_home, resolve_team(home))
+    a = _enc(le_away, resolve_team(away))
+    tw = FIFA_STAGE_W.get(stage, 5)
+    return [h, a, tw, 0, h_wr, a_wr, 0.1, -0.1, h_wr-a_wr, 0.2, 0.45]
+
+def fifa_wdl(model, le_home, le_away, home, away, stage="group"):
+    pr = model.predict_proba([fifa_feats(le_home, le_away, home, away, stage)])[0]
+    cl = list(model.classes_)
+    p  = {c: float(v) for c, v in zip(cl, pr)}
+    return p.get("win",0.33), p.get("draw",0.34), p.get("loss",0.33)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  IPL SIMULATOR
 # ═══════════════════════════════════════════════════════════════════════════════
+def _parse_fixture(fix):
+    """Accept tuple (t1,t2,venue) or dict {team1,team2,venue}."""
+    if isinstance(fix, dict):
+        return fix["team1"], fix["team2"], fix.get("venue")
+    return fix[0], fix[1], fix[2] if len(fix) > 2 else None
 
-def ipl_predict_win_prob(model, le_t1, le_t2, le_venue, team1, team2, venue=None):
-    """Return probability that team1 wins."""
-    def enc(le, val, fallback=0):
-        try: return le.transform([val])[0]
-        except: return fallback
+def simulate_ipl_season(model, le_t1, le_t2, le_venue, points_table, fixtures):
+    pts = deepcopy(points_table)
 
-    t1_enc  = enc(le_t1, team1)
-    t2_enc  = enc(le_t2, team2)
-    v_enc   = enc(le_venue, venue) if le_venue and venue else 0
+    # Ensure all IPL teams exist in pts
+    for t in IPL_TEAMS:
+        if t not in pts:
+            pts[t] = {"played":0,"won":0,"lost":0,"nr":0,"pts":0,"nrr":0.0}
 
-    # Default form features — in production, pull from live points table
-    features = [t1_enc, t2_enc, 1, 1, v_enc,
-                0.5, 0.5, 0, 0, 0.0, 0.0, 0.5, 2026]
+    for fix in fixtures:
+        t1, t2, venue = _parse_fixture(fix)
+        played1 = max(pts[t1].get("played", 1), 1)
+        played2 = max(pts[t2].get("played", 1), 1)
+        t1_wr = pts[t1].get("won", 0) / played1
+        t2_wr = pts[t2].get("won", 0) / played2
 
-    proba = model.predict_proba([features])[0]
-    classes = list(model.classes_)
-    return float(proba[classes.index(1)])  # prob team1 wins
+        p = ipl_win_prob(model, le_t1, le_t2, le_venue,
+                          t1, t2, venue, t1_wr=t1_wr, t2_wr=t2_wr)
+        winner = t1 if random.random() < p else t2
+        loser  = t2 if winner == t1 else t1
 
+        pts[winner]["pts"]    += 2
+        pts[winner]["won"]    = pts[winner].get("won", 0) + 1
+        pts[winner]["played"] = pts[winner].get("played", 0) + 1
+        pts[loser]["lost"]    = pts[loser].get("lost", 0) + 1
+        pts[loser]["played"]  = pts[loser].get("played", 0) + 1
 
-def simulate_ipl_season(model, le_t1, le_t2, le_venue,
-                         current_points, remaining_fixtures):
-    """
-    Simulate remaining IPL league stage.
-    Returns final points table dict sorted by pts desc, nrr desc.
-    """
-    pts = deepcopy(current_points)
-
-    for (t1, t2, *venue_args) in remaining_fixtures:
-        venue = venue_args[0] if venue_args else None
-        p_win = ipl_predict_win_prob(model, le_t1, le_t2, le_venue, t1, t2, venue)
-        if random.random() < p_win:
-            pts[t1]["pts"] += 2; pts[t1]["won"] += 1
-            pts[t2]["lost"] += 1
-        else:
-            pts[t2]["pts"] += 2; pts[t2]["won"] += 1
-            pts[t1]["lost"] += 1
-
-    # Sort: pts desc, then nrr desc (tiebreaker)
     ranked = sorted(pts.keys(),
-                    key=lambda t: (pts[t]["pts"], pts[t]["nrr"]),
+                    key=lambda t: (pts[t].get("pts",0), pts[t].get("nrr",0.0)),
                     reverse=True)
     return ranked, pts
 
-
 def simulate_ipl_playoffs(model, le_t1, le_t2, le_venue, top4):
-    """
-    Simulate Q1 → Eliminator → Q2 → Final.
-    Returns predicted champion.
-    """
-    def win(t1, t2):
-        p = ipl_predict_win_prob(model, le_t1, le_t2, le_venue, t1, t2)
-        return t1 if random.random() < p else t2
+    """Simulate Q1 → Eliminator → Q2 → Final. Requires exactly 4 teams."""
+    if len(top4) < 4:
+        # Pad with random IPL teams if simulation produced fewer
+        extras = [t for t in IPL_TEAMS if t not in top4]
+        top4   = (top4 + extras)[:4]
 
-    # Qualifier 1: 1st vs 2nd — winner goes to final
-    q1_winner = win(top4[0], top4[1])
-    q1_loser  = top4[1] if q1_winner == top4[0] else top4[0]
+    def win(a, b, stage="qualifier_1"):
+        p = ipl_win_prob(model, le_t1, le_t2, le_venue, a, b, stage=stage)
+        return a if random.random() < p else b
 
-    # Eliminator: 3rd vs 4th — loser eliminated
-    elim_winner = win(top4[2], top4[3])
+    q1w   = win(top4[0], top4[1], "qualifier_1")
+    q1l   = top4[1] if q1w == top4[0] else top4[0]
+    elim  = win(top4[2], top4[3], "eliminator")
+    q2w   = win(q1l, elim, "qualifier_2")
+    champ = win(q1w, q2w, "final")
+    return champ
 
-    # Qualifier 2: Q1 loser vs Eliminator winner
-    q2_winner = win(q1_loser, elim_winner)
-
-    # Final
-    champion = win(q1_winner, q2_winner)
-    return champion, q1_winner, q2_winner
-
-
-def run_ipl_simulation(n=N_SIMULATIONS):
+def run_ipl_simulation(n=N_SIMULATIONS, points_table=None, fixtures=None):
     print(f"\n🏏 IPL Simulator — {n:,} simulations")
-    model, le_t1, le_t2, le_venue = load_ipl_model()
+    model, le_t1, le_t2, le_venue = load_ipl()
 
-    playoff_count  = defaultdict(int)   # times team finished top 4
-    champion_count = defaultdict(int)   # times team won IPL
-    finish_pos     = defaultdict(lambda: defaultdict(int))
+    # Use S3-loaded fixtures as defaults if none passed in request
+    pts  = points_table if points_table else IPL_POINTS_TABLE
+    fixs = fixtures     if fixtures     else IPL_REMAINING_FIXTURES
 
-    for i in range(n):
-        ranked, pts = simulate_ipl_season(
-            model, le_t1, le_t2, le_venue,
-            IPL_POINTS_TABLE, IPL_REMAINING_FIXTURES
-        )
+    if not pts:
+        print("   ⚠ Empty points table — defaulting all teams to equal prior")
+        pts = {t: {"played":7,"won":3,"lost":4,"nr":0,"pts":6,"nrr":0.0}
+               for t in IPL_TEAMS}
+
+    playoff_count  = defaultdict(int)
+    champion_count = defaultdict(int)
+
+    for _ in range(n):
+        ranked, _ = simulate_ipl_season(model, le_t1, le_t2, le_venue, pts, fixs)
         top4 = ranked[:4]
         for t in top4:
             playoff_count[t] += 1
-        for pos, team in enumerate(ranked):
-            finish_pos[team][pos+1] += 1
-
-        champion, _, _ = simulate_ipl_playoffs(model, le_t1, le_t2, le_venue, top4)
-        champion_count[champion] += 1
-
-    print(f"\n{'Team':<35} {'Playoff%':>9} {'Champion%':>10} {'Avg Finish':>11}")
-    print("─" * 70)
-    for team in sorted(IPL_TEAMS, key=lambda t: -playoff_count[t]):
-        playoff_pct  = playoff_count[team]  / n * 100
-        champ_pct    = champion_count[team] / n * 100
-        avg_finish   = sum(pos * cnt for pos, cnt in finish_pos[team].items()) / n
-        print(f"  {team:<33} {playoff_pct:>8.1f}%  {champ_pct:>9.1f}%  {avg_finish:>10.2f}")
-
-    print(f"\n🏆 Most likely champion: {max(champion_count, key=champion_count.get)}")
-    print(f"   ({champion_count[max(champion_count, key=champion_count.get)]/n*100:.1f}% of simulations)")
+        champ = simulate_ipl_playoffs(model, le_t1, le_t2, le_venue, top4)
+        champion_count[champ] += 1
 
     return {
         "playoff_probabilities":  {t: round(playoff_count[t]/n, 4)  for t in IPL_TEAMS},
         "champion_probabilities": {t: round(champion_count[t]/n, 4) for t in IPL_TEAMS},
+        "simulations_run": n,
     }
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FIFA SIMULATOR
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def fifa_predict_proba(model, le_home, le_away, home, away, stage="group"):
-    """Return (p_win, p_draw, p_loss) for home team."""
-    STAGE_W = {"group":5,"round_of_32":6,"round_of_16":7,
-               "quarterfinal":8,"semifinal":9,"final":10}
-
-    def enc(le, val):
-        resolved = resolve_team(val)
-        try:    return le.transform([resolved])[0]
-        except: return 0
-
-    h_enc = enc(le_home, home)
-    a_enc = enc(le_away, away)
-    tw    = STAGE_W.get(stage, 5)
-
-    features = [h_enc, a_enc, tw, 0, 0.45, 0.40, 0.1, -0.1, 0.05, 0.2, 0.45]
-    proba   = model.predict_proba([features])[0]
-    classes = list(model.classes_)
-    p = {c: float(p) for c, p in zip(classes, proba)}
-    return p.get("win",0.33), p.get("draw",0.34), p.get("loss",0.33)
-
-
 def simulate_group_stage(model, le_home, le_away):
-    """
-    Simulate all 72 group stage matches.
-    Returns dict: group -> ranked list of teams with pts/gd.
-    """
-    # Initialize standings per group
-    standings = {}
-    for grp, teams in FIFA_GROUPS.items():
-        standings[grp] = {t: {"pts":0,"gd":0,"gf":0} for t in teams}
-
-    # Find which group a team belongs to
+    standings     = {g: {t: {"pts":0,"gd":0,"gf":0} for t in ts}
+                     for g, ts in FIFA_GROUPS.items()}
     team_to_group = {t: g for g, ts in FIFA_GROUPS.items() for t in ts}
 
-    for (home, away, match_num, date) in FIFA_GROUP_FIXTURES:
+    for fix in FIFA_GROUP_FIXTURES:
+        # Handle (home, away, match_num, date) tuple format
+        home, away = fix[0], fix[1]
         grp = team_to_group.get(home)
-        if not grp:
-            continue
+        if not grp: continue
 
-        pw, pd, pl = fifa_predict_proba(model, le_home, le_away, home, away, "group")
-
-        # Simulate goals (Poisson-like from win prob)
+        pw, pd, pl = fifa_wdl(model, le_home, le_away, home, away, "group")
         r = random.random()
-        if r < pw:       # home wins
-            hg = random.randint(1, 3); ag = random.randint(0, hg-1)
+        if r < pw:
+            hg = random.randint(1,3); ag = random.randint(0, max(0,hg-1))
             standings[grp][home]["pts"] += 3
-        elif r < pw+pd:  # draw
-            hg = ag = random.randint(0, 2)
+        elif r < pw+pd:
+            hg = ag = random.randint(0,2)
             standings[grp][home]["pts"] += 1
             standings[grp][away]["pts"] += 1
-        else:            # away wins
-            ag = random.randint(1, 3); hg = random.randint(0, ag-1)
+        else:
+            ag = random.randint(1,3); hg = random.randint(0, max(0,ag-1))
             standings[grp][away]["pts"] += 3
 
-        for t, g, c in [(home, hg, ag), (away, ag, hg)]:
-            if t in standings[grp]:
-                standings[grp][t]["gd"] += (g - c)
-                standings[grp][t]["gf"] += g
+        standings[grp][home]["gd"] += hg-ag; standings[grp][home]["gf"] += hg
+        standings[grp][away]["gd"] += ag-hg; standings[grp][away]["gf"] += ag
 
-    # Rank each group: pts desc, gd desc, gf desc
-    ranked = {}
-    for grp, table in standings.items():
-        ranked[grp] = sorted(table.keys(),
-                             key=lambda t: (table[t]["pts"],
-                                            table[t]["gd"],
-                                            table[t]["gf"]),
-                             reverse=True)
+    ranked = {g: sorted(t.keys(),
+                        key=lambda x: (t[x]["pts"],t[x]["gd"],t[x]["gf"]),
+                        reverse=True)
+              for g, t in standings.items()}
     return ranked, standings
 
-
-def best_third_place_teams(standings, ranked):
-    """
-    FIFA 2026 has 12 groups — top 2 from each advance (24 teams).
-    8 more spots filled by best 3rd-place teams across all groups.
-    Returns list of 8 best 3rd-place teams.
-    """
-    third_place = []
-    for grp, teams in ranked.items():
-        if len(teams) >= 3:
-            t = teams[2]
-            third_place.append((t, standings[grp][t]))
-
-    # Sort 3rd-place teams by pts, gd, gf
-    third_place.sort(key=lambda x: (x[1]["pts"], x[1]["gd"], x[1]["gf"]), reverse=True)
-    return [t for t, _ in third_place[:8]]
-
-
-def simulate_knockout_match(model, le_home, le_away, team1, team2, stage):
-    """No draws in knockout — use penalty shootout tiebreak."""
-    pw, pd, pl = fifa_predict_proba(model, le_home, le_away, team1, team2, stage)
+def sim_ko(model, le_home, le_away, t1, t2, stage):
+    pw, pd, pl = fifa_wdl(model, le_home, le_away, t1, t2, stage)
     r = random.random()
-    if r < pw:
-        return team1
-    elif r < pw + pd:
-        # Penalties — treat as 50/50 adjusted by slight win-prob lean
-        return team1 if random.random() < (0.5 + (pw-pl)*0.1) else team2
-    else:
-        return team2
-
-
-def simulate_full_tournament(model, le_home, le_away):
-    """Simulate group stage + full knockout bracket. Returns champion."""
-    ranked, standings = simulate_group_stage(model, le_home, le_away)
-    best_thirds       = best_third_place_teams(standings, ranked)
-
-    # Build round of 32 bracket
-    # Group winners (1A–1L), runners-up (2A–2L), best 3rd-place
-    group_1st = {g: ranked[g][0] for g in FIFA_GROUPS}
-    group_2nd = {g: ranked[g][1] for g in FIFA_GROUPS}
-
-    # Simplified bracket seeding (mirrors PDF structure)
-    # Round of 32 matchups from PDF
-    r32_pairs = [
-        (group_2nd["A"], group_2nd["B"]),
-        (group_1st["F"], group_2nd["C"]),
-        (group_1st["C"], group_2nd["F"]),
-        (group_2nd["E"], group_2nd["I"]),
-        (group_1st["J"], group_2nd["H"]),
-        (group_2nd["K"], group_2nd["L"]),
-        (group_1st["A"], best_thirds[0] if best_thirds else group_2nd["A"]),
-        (group_1st["I"], best_thirds[1] if len(best_thirds)>1 else group_2nd["I"]),
-        (group_1st["D"], best_thirds[2] if len(best_thirds)>2 else group_2nd["D"]),
-        (group_1st["G"], best_thirds[3] if len(best_thirds)>3 else group_2nd["G"]),
-        (group_1st["B"], best_thirds[4] if len(best_thirds)>4 else group_2nd["B"]),
-        (group_1st["L"], best_thirds[5] if len(best_thirds)>5 else group_2nd["L"]),
-        (group_1st["E"], best_thirds[6] if len(best_thirds)>6 else group_2nd["E"]),
-        (group_1st["H"], group_2nd["J"]),
-        (group_2nd["D"], group_2nd["G"]),
-        (group_1st["K"], best_thirds[7] if len(best_thirds)>7 else group_2nd["K"]),
-    ]
-
-    def play_round(pairs, stage):
-        winners = []
-        for t1, t2 in pairs:
-            winners.append(simulate_knockout_match(model, le_home, le_away, t1, t2, stage))
-        return winners
-
-    r32_winners  = play_round(r32_pairs,          "round_of_32")
-    r16_pairs    = list(zip(r32_winners[::2], r32_winners[1::2]))
-    r16_winners  = play_round(r16_pairs,           "round_of_16")
-    qf_pairs     = list(zip(r16_winners[::2], r16_winners[1::2]))
-    qf_winners   = play_round(qf_pairs,            "quarterfinal")
-    sf_pairs     = list(zip(qf_winners[::2], qf_winners[1::2]))
-    sf_winners   = play_round(sf_pairs,            "semifinal")
-    champion     = simulate_knockout_match(
-        model, le_home, le_away, sf_winners[0], sf_winners[1], "final"
-    )
-    return champion, group_1st, group_2nd
-
+    if r < pw:    return t1
+    if r < pw+pd: return t1 if random.random() < (0.5+(pw-pl)*0.1) else t2
+    return t2
 
 def run_fifa_simulation(n=N_SIMULATIONS):
-    print(f"\n⚽ FIFA World Cup 2026 Simulator — {n:,} simulations")
-    model, le_home, le_away = load_fifa_model()
+    print(f"\n⚽ FIFA WC 2026 Simulator — {n:,} simulations")
+    model, le_home, le_away = load_fifa()
 
-    champion_count  = defaultdict(int)
-    group_advance   = defaultdict(int)   # times team finished top 2 in group
-    all_teams_flat  = [t for ts in FIFA_GROUPS.values() for t in ts]
+    advance  = defaultdict(int)
+    champion = defaultdict(int)
+    all_teams = [t for ts in FIFA_GROUPS.values() for t in ts]
 
-    for i in range(n):
-        champion, g1st, g2nd = simulate_full_tournament(model, le_home, le_away)
-        champion_count[champion] += 1
-        for grp in FIFA_GROUPS:
-            group_advance[g1st[grp]] += 1
-            group_advance[g2nd[grp]] += 1
+    for _ in range(n):
+        ranked, standings = simulate_group_stage(model, le_home, le_away)
 
-    # Print group qualification table
-    print(f"\n{'Team':<30} {'Group Advance%':>15} {'Win Tournament%':>16}")
-    print("─" * 65)
-    for grp, teams in FIFA_GROUPS.items():
-        print(f"\n  ── Group {grp} ──")
-        for team in teams:
-            adv_pct  = group_advance[team]  / n * 100
-            champ_pct = champion_count[team] / n * 100
-            bar = "█" * int(champ_pct / 2)
-            print(f"  {team:<28} {adv_pct:>13.1f}%  {champ_pct:>14.1f}%  {bar}")
+        thirds = sorted(
+            [(teams[2], standings[g][teams[2]])
+             for g, teams in ranked.items() if len(teams) >= 3],
+            key=lambda x: (x[1]["pts"],x[1]["gd"],x[1]["gf"]), reverse=True
+        )
+        best3 = [t for t,_ in thirds[:8]]
 
-    top_5 = sorted(champion_count.items(), key=lambda x: -x[1])[:5]
-    print(f"\n🏆 Top 5 predicted champions:")
-    for i, (team, cnt) in enumerate(top_5, 1):
-        print(f"   {i}. {team:<28} {cnt/n*100:.1f}%")
+        g1 = {g: ranked[g][0] for g in FIFA_GROUPS}
+        g2 = {g: ranked[g][1] for g in FIFA_GROUPS}
+
+        for g in FIFA_GROUPS:
+            advance[g1[g]] += 1
+            advance[g2[g]] += 1
+        for t in best3:
+            advance[t] += 1
+
+        def b3(i): return best3[i] if i < len(best3) else g2[list(FIFA_GROUPS)[i % 12]]
+
+        r32 = [
+            (g2["A"],g2["B"]), (g1["F"],g2["C"]), (g1["C"],g2["F"]), (g2["E"],g2["I"]),
+            (g1["J"],g2["H"]), (g2["K"],g2["L"]), (g1["A"],b3(0)),   (g1["I"],b3(1)),
+            (g1["D"],b3(2)),   (g1["G"],b3(3)),   (g1["B"],b3(4)),   (g1["L"],b3(5)),
+            (g1["E"],b3(6)),   (g1["H"],g2["J"]), (g2["D"],g2["G"]), (g1["K"],b3(7)),
+        ]
+
+        def play(pairs, stage):
+            return [sim_ko(model, le_home, le_away, a, b, stage) for a,b in pairs]
+
+        r32w = play(r32,                             "round_of_32")
+        r16w = play(list(zip(r32w[::2],r32w[1::2])), "round_of_16")
+        qfw  = play(list(zip(r16w[::2],r16w[1::2])), "quarterfinal")
+        sfw  = play(list(zip(qfw[::2], qfw[1::2])),  "semifinal")
+        champ = sim_ko(model, le_home, le_away, sfw[0], sfw[1], "final")
+        champion[champ] += 1
 
     return {
-        "group_qualification": {t: round(group_advance[t]/n, 4)  for t in all_teams_flat},
-        "champion_probability":{t: round(champion_count[t]/n, 4) for t in all_teams_flat},
+        "group_qualification":  {t: round(advance[t]/n,  4) for t in all_teams},
+        "champion_probability": {t: round(champion[t]/n, 4) for t in all_teams},
+        "simulations_run": n,
     }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LAMBDA HANDLER
+# ═══════════════════════════════════════════════════════════════════════════════
+def clean(obj):
+    if isinstance(obj, defaultdict):  return clean(dict(obj))
+    if isinstance(obj, dict):         return {k: clean(v) for k,v in obj.items()}
+    if isinstance(obj, (list,tuple)): return [clean(x) for x in obj]
+    if isinstance(obj, np.integer):   return int(obj)
+    if isinstance(obj, np.floating):  return float(obj)
+    return obj
+
+def _resp(status, body):
+    return {"statusCode": status,
+            "headers": {"Content-Type":"application/json","Access-Control-Allow-Origin":"*"},
+            "body": json.dumps(body)}
+
+def handler(event, context):
+    try:
+        body  = json.loads(event.get("body") or "{}")
+        sport = body.get("sport", "ipl").lower()
+        n     = min(int(body.get("simulations", 50)), 50)
+
+        # Optional overrides from request body
+        pts  = body.get("points_table")    # None → use S3-loaded IPL_POINTS_TABLE
+        fixs = body.get("remaining_fixtures") # None → use S3-loaded IPL_REMAINING_FIXTURES
+
+        if sport == "ipl":
+            result = run_ipl_simulation(n, pts, fixs)
+        elif sport == "fifa":
+            result = run_fifa_simulation(n)
+        elif sport == "both":
+            result = {"ipl": run_ipl_simulation(n, pts, fixs),
+                      "fifa": run_fifa_simulation(n)}
+        else:
+            return _resp(400, {"error": "sport must be ipl, fifa, or both"})
+
+        return _resp(200, clean(result))
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return _resp(500, {"error": str(e)})
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  ENTRY POINT
+#  LOCAL CLI
 # ═══════════════════════════════════════════════════════════════════════════════
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--sport", choices=["ipl","fifa","both"], default="both")
@@ -357,82 +356,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     results = {}
-    if args.sport in ("ipl", "both"):
-        results["ipl"]  = run_ipl_simulation(args.sims)
-    if args.sport in ("fifa", "both"):
-        results["fifa"] = run_fifa_simulation(args.sims)
+    if args.sport in ("ipl","both"):  results["ipl"]  = run_ipl_simulation(args.sims)
+    if args.sport in ("fifa","both"): results["fifa"] = run_fifa_simulation(args.sims)
 
-    with open("simulation_results.json", "w") as f:
+    with open("simulation_results.json","w") as f:
         json.dump(results, f, indent=2)
-    print("\n✅ Results saved to simulation_results.json")
-print("\n✅ Results saved to simulation_results.json")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  AWS LAMBDA HANDLER
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def handler(event, context):
-
-    try:
-
-        body = {}
-
-        if event.get("body"):
-            body = json.loads(event["body"])
-
-        sport = body.get("sport", "ipl").lower()
-        sims  = int(body.get("simulations", 1000))
-
-        if sims > 5000:
-            sims = 5000
-
-        if sport == "ipl":
-
-            result = run_ipl_simulation(sims)
-
-        elif sport == "fifa":
-
-            result = run_fifa_simulation(sims)
-
-        elif sport == "both":
-
-            result = {
-                "ipl": run_ipl_simulation(sims),
-                "fifa": run_fifa_simulation(sims)
-            }
-
-        else:
-
-            return {
-                "statusCode": 400,
-                "headers": {
-                    "Content-Type": "application/json",
-                    "Access-Control-Allow-Origin": "*"
-                },
-                "body": json.dumps({
-                    "error": "invalid sport"
-                })
-            }
-
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*"
-            },
-            "body": json.dumps(result)
-        }
-
-    except Exception as e:
-
-        return {
-            "statusCode": 500,
-            "headers": {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*"
-            },
-            "body": json.dumps({
-                "error": str(e)
-            })
-        }
+    print("\n✅ simulation_results.json saved")

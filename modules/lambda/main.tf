@@ -124,8 +124,8 @@ resource "aws_lambda_function" "simulate" {
   runtime          = "python3.12"
   filename         = data.archive_file.predict.output_path
   source_code_hash = data.archive_file.predict.output_base64sha256
-  memory_size      = 512
-  timeout          = 60   # Monte Carlo needs more time
+  memory_size      = 1024
+  timeout          = 300   # Monte Carlo needs more time
   layers = local.layers
   environment { variables = local.common_env }
 }
